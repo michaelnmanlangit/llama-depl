@@ -1,0 +1,17 @@
+# Core dependencies for Llama-3.2-1B deployment
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+
+# HuggingFace and ML libraries (optimized for low memory)
+transformers==4.43.0
+torch==2.2.0
+accelerate==0.26.1
+bitsandbytes==0.42.0  # For quantization
+sentencepiece==0.1.99
+protobuf==4.25.2
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
