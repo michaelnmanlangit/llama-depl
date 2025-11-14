@@ -1,0 +1,15 @@
+# Minimal requirements for App Platform deployment
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# HuggingFace and ML (optimized versions)
+transformers==4.43.0
+torch==2.2.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+accelerate==0.26.1
+bitsandbytes==0.42.0
+sentencepiece==0.1.99
+protobuf==4.25.2
+
+# Utilities
+python-dotenv==1.0.0

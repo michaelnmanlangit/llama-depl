@@ -55,15 +55,23 @@ async def load_model():
         logger.info("Loading Llama-3.2-1B model with 4-bit quantization...")
         model_id = "meta-llama/Llama-3.2-1B"
         
+        # Set HuggingFace token from environment
+        hf_token = os.getenv("HF_TOKEN")
+        if not hf_token:
+            logger.error("HF_TOKEN environment variable not set!")
+            raise ValueError("HF_TOKEN required")
+        
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
+            token=hf_token,
             trust_remote_code=True
         )
         
         # Load model with 4-bit quantization for low memory usage
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
+            token=hf_token,
             quantization_config=quantization_config,
             device_map="auto",
             trust_remote_code=True,
