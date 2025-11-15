@@ -1,13 +1,13 @@
 """
 FastAPI web service for Llama-3.2-1B
-Optimized for 4GB RAM DigitalOcean droplet
+Optimized for CPU-only deployment on DigitalOcean droplet
 """
 import os
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Optional
 import logging
 
@@ -26,14 +26,6 @@ app = FastAPI(
 model = None
 tokenizer = None
 
-# Configuration for 4-bit quantization (saves ~75% memory)
-quantization_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4"
-)
-
 class TextGenerationRequest(BaseModel):
     prompt: str = Field(..., description="Input text prompt", min_length=1, max_length=2048)
     max_new_tokens: Optional[int] = Field(default=256, ge=1, le=1024)
@@ -48,11 +40,11 @@ class TextGenerationResponse(BaseModel):
 
 @app.on_event("startup")
 async def load_model():
-    """Load model and tokenizer on startup with memory optimization"""
+    """Load model and tokenizer on startup with memory optimization for CPU"""
     global model, tokenizer
     
     try:
-        logger.info("Loading Llama-3.2-1B model with 4-bit quantization...")
+        logger.info("Loading Llama-3.2-1B model for CPU inference...")
         model_id = "meta-llama/Llama-3.2-1B"
         
         # Set HuggingFace token from environment
@@ -62,24 +54,27 @@ async def load_model():
             raise ValueError("HF_TOKEN required")
         
         # Load tokenizer
+        logger.info("Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             token=hf_token,
             trust_remote_code=True
         )
         
-        # Load model with 4-bit quantization for low memory usage
+        # Load model with CPU optimizations (no quantization for CPU)
+        logger.info("Loading model (this may take a few minutes)...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             token=hf_token,
-            quantization_config=quantization_config,
-            device_map="auto",
+            torch_dtype=torch.float32,  # Use float32 for CPU
+            device_map="cpu",
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
         
         logger.info("Model loaded successfully!")
         logger.info(f"Model device: {model.device}")
+        logger.info(f"Model dtype: {model.dtype}")
         
     except Exception as e:
         logger.error(f"Failed to load model: {str(e)}")
