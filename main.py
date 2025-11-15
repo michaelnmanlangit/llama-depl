@@ -7,7 +7,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from typing import Optional
 import logging
 
@@ -25,6 +25,10 @@ app = FastAPI(
 # Global variables for model and tokenizer
 model = None
 tokenizer = None
+
+# Performance optimizations
+torch.set_num_threads(2)  # Limit CPU threads to prevent overhead
+torch.set_grad_enabled(False)  # Disable gradient computation
 
 class TextGenerationRequest(BaseModel):
     prompt: str = Field(..., description="Input text prompt", min_length=1, max_length=2048)
@@ -69,8 +73,19 @@ async def load_model():
             torch_dtype=torch.float16,  # Use float16 to reduce memory usage
             device_map="cpu",
             trust_remote_code=True,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
+            use_cache=True  # Enable KV cache for faster generation
         )
+        
+        # Optimize model for inference
+        model.eval()  # Set to evaluation mode
+        
+        # Enable torch compile for faster inference (if available)
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            logger.info("Model compiled with torch.compile for better performance")
+        except Exception as e:
+            logger.warning(f"torch.compile not available: {e}")
         
         logger.info("Model loaded successfully!")
         logger.info(f"Model device: {model.device}")
@@ -105,7 +120,7 @@ async def root():
 
 @app.post("/generate", response_model=TextGenerationResponse)
 async def generate_text(request: TextGenerationRequest):
-    """Generate text from the model"""
+    """Generate text from the model with optimizations"""
     global model, tokenizer
     
     if model is None or tokenizer is None:
@@ -116,15 +131,19 @@ async def generate_text(request: TextGenerationRequest):
         inputs = tokenizer(request.prompt, return_tensors="pt").to(model.device)
         prompt_tokens = inputs.input_ids.shape[1]
         
-        # Generate
-        with torch.no_grad():
+        # Generate with optimizations
+        with torch.no_grad(), torch.inference_mode():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
                 top_p=request.top_p,
                 do_sample=request.do_sample,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.eos_token_id,
+                use_cache=True,  # Enable KV caching
+                num_beams=1,  # Disable beam search for speed
+                early_stopping=False,
+                repetition_penalty=1.1  # Slight penalty to reduce repetition
             )
         
         # Decode output
