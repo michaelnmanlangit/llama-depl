@@ -61,12 +61,12 @@ async def load_model():
             trust_remote_code=True
         )
         
-        # Load model with CPU optimizations (no quantization for CPU)
+        # Load model with CPU optimizations (float16 to save memory)
         logger.info("Loading model (this may take a few minutes)...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             token=hf_token,
-            torch_dtype=torch.float32,  # Use float32 for CPU
+            torch_dtype=torch.float16,  # Use float16 to reduce memory usage
             device_map="cpu",
             trust_remote_code=True,
             low_cpu_mem_usage=True

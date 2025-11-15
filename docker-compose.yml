@@ -14,9 +14,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3500M  # Leave some RAM for system
+          memory: 7000M  # Use most of the 8GB
         reservations:
-          memory: 2000M
+          memory: 4000M
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
