@@ -1,13 +1,13 @@
 """
 FastAPI web service for Llama-3.2-1B
-Optimized for CPU-only deployment on DigitalOcean droplet
+Heavily optimized for CPU-only deployment on DigitalOcean droplet
 """
 import os
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from typing import Optional
 import logging
 
@@ -15,27 +15,33 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Aggressive CPU optimizations
+os.environ["OMP_NUM_THREADS"] = "4"  # OpenMP threads
+os.environ["MKL_NUM_THREADS"] = "4"  # MKL threads
+torch.set_num_threads(4)  # PyTorch threads (use all cores on 2vCPU)
+torch.set_grad_enabled(False)  # Disable gradients globally
+torch.backends.quantized.engine = 'qnnpack'  # Optimized backend for ARM/x86
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Llama-3.2-1B API",
-    description="Optimized LLM inference API for DigitalOcean",
+    description="CPU-Optimized LLM inference API",
     version="1.0.0"
 )
 
-# Global variables for model and tokenizer
+# Global variables
 model = None
 tokenizer = None
-
-# Performance optimizations
-torch.set_num_threads(2)  # Limit CPU threads to prevent overhead
-torch.set_grad_enabled(False)  # Disable gradient computation
+generation_config = None
 
 class TextGenerationRequest(BaseModel):
     prompt: str = Field(..., description="Input text prompt", min_length=1, max_length=2048)
-    max_new_tokens: Optional[int] = Field(default=256, ge=1, le=1024)
+    max_new_tokens: Optional[int] = Field(default=100, ge=1, le=512)  # Reduced default
     temperature: Optional[float] = Field(default=0.7, ge=0.1, le=2.0)
     top_p: Optional[float] = Field(default=0.9, ge=0.1, le=1.0)
     do_sample: Optional[bool] = Field(default=True)
+    # New fields for speed
+    top_k: Optional[int] = Field(default=50, ge=1, le=100)  # Limit sampling space
 
 class TextGenerationResponse(BaseModel):
     generated_text: str
@@ -44,48 +50,58 @@ class TextGenerationResponse(BaseModel):
 
 @app.on_event("startup")
 async def load_model():
-    """Load model and tokenizer on startup with memory optimization for CPU"""
-    global model, tokenizer
+    """Load model and tokenizer with aggressive CPU optimizations"""
+    global model, tokenizer, generation_config
     
     try:
         logger.info("Loading Llama-3.2-1B model for CPU inference...")
         model_id = "meta-llama/Llama-3.2-1B"
         
-        # Set HuggingFace token from environment
         hf_token = os.getenv("HF_TOKEN")
         if not hf_token:
             logger.error("HF_TOKEN environment variable not set!")
             raise ValueError("HF_TOKEN required")
         
-        # Load tokenizer
+        # Load tokenizer with padding
         logger.info("Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             token=hf_token,
-            trust_remote_code=True
+            trust_remote_code=True,
+            padding_side="left"
         )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
         
-        # Load model with CPU optimizations (float16 to save memory)
+        # Load model with aggressive optimizations
         logger.info("Loading model (this may take a few minutes)...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             token=hf_token,
-            torch_dtype=torch.float16,  # Use float16 to reduce memory usage
+            torch_dtype=torch.float32,  # float32 for CPU (better compatibility)
             device_map="cpu",
             trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            use_cache=True  # Enable KV cache for faster generation
+            low_cpu_mem_usage=True
         )
         
-        # Optimize model for inference
-        model.eval()  # Set to evaluation mode
+        # Set to eval mode and freeze
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
         
-        # Enable torch compile for faster inference (if available)
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-            logger.info("Model compiled with torch.compile for better performance")
-        except Exception as e:
-            logger.warning(f"torch.compile not available: {e}")
+        # Create optimized generation config
+        generation_config = GenerationConfig(
+            max_new_tokens=100,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            top_k=50,
+            repetition_penalty=1.1,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,  # Critical for speed
+            num_beams=1,  # Greedy/sampling only
+        )
         
         logger.info("Model loaded successfully!")
         logger.info(f"Model device: {model.device}")
@@ -110,7 +126,7 @@ async def root():
     return {
         "message": "Llama-3.2-1B API",
         "model": "meta-llama/Llama-3.2-1B",
-        "optimization": "4-bit quantization",
+        "optimization": "CPU-optimized (float32, KV cache, inference_mode)",
         "endpoints": {
             "generate": "/generate",
             "health": "/health",
@@ -120,34 +136,52 @@ async def root():
 
 @app.post("/generate", response_model=TextGenerationResponse)
 async def generate_text(request: TextGenerationRequest):
-    """Generate text from the model with optimizations"""
-    global model, tokenizer
+    """Generate text with maximum CPU optimization"""
+    global model, tokenizer, generation_config
     
     if model is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        # Tokenize input
-        inputs = tokenizer(request.prompt, return_tensors="pt").to(model.device)
+        # Tokenize with minimal overhead
+        inputs = tokenizer(
+            request.prompt, 
+            return_tensors="pt",
+            padding=False,
+            truncation=True,
+            max_length=512  # Limit input size
+        )
         prompt_tokens = inputs.input_ids.shape[1]
         
-        # Generate with optimizations
-        with torch.no_grad(), torch.inference_mode():
+        # Update generation config with request parameters
+        gen_config = generation_config
+        gen_config.max_new_tokens = min(request.max_new_tokens, 200)  # Hard cap
+        gen_config.temperature = request.temperature
+        gen_config.top_p = request.top_p
+        gen_config.top_k = request.top_k
+        gen_config.do_sample = request.do_sample
+        
+        # Generate with maximum optimization
+        with torch.inference_mode():  # More aggressive than no_grad
             outputs = model.generate(
-                **inputs,
-                max_new_tokens=request.max_new_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                do_sample=request.do_sample,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True,  # Enable KV caching
-                num_beams=1,  # Disable beam search for speed
-                early_stopping=False,
-                repetition_penalty=1.1  # Slight penalty to reduce repetition
+                inputs.input_ids,
+                generation_config=gen_config,
+                attention_mask=inputs.attention_mask if 'attention_mask' in inputs else None
             )
         
-        # Decode output
+        # Decode efficiently
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_tokens = outputs.shape[1] - prompt_tokens
+        
+        return TextGenerationResponse(
+            generated_text=generated_text,
+            prompt_tokens=prompt_tokens,
+            generated_tokens=generated_tokens
+        )
+        
+    except Exception as e:
+        logger.error(f"Generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
         generated_tokens = outputs.shape[1] - prompt_tokens
         
         return TextGenerationResponse(
